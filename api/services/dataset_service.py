@@ -4,6 +4,7 @@ import logging
 import random
 import time
 import uuid
+from collections import Counter
 from typing import Any, Optional
 
 from flask_login import current_user  # type: ignore
@@ -71,7 +72,7 @@ from tasks.sync_website_document_indexing_task import sync_website_document_inde
 
 class DatasetService:
     @staticmethod
-    def get_datasets(page, per_page, tenant_id=None, user=None, search=None, tag_ids=None):
+    def get_datasets(page, per_page, tenant_id=None, user=None, search=None, tag_ids=None, include_all=False):
         query = Dataset.query.filter(Dataset.tenant_id == tenant_id).order_by(Dataset.created_at.desc())
 
         if user:
@@ -86,7 +87,7 @@ class DatasetService:
                 else:
                     return [], 0
             else:
-                if user.current_role not in (TenantAccountRole.OWNER, TenantAccountRole.ADMIN):
+                if user.current_role != TenantAccountRole.OWNER or not include_all:
                     # show all datasets that the user has permission to access
                     if permitted_dataset_ids:
                         query = query.filter(
@@ -221,8 +222,7 @@ class DatasetService:
                 )
             except LLMBadRequestError:
                 raise ValueError(
-                    "No Embedding Model available. Please configure a valid provider "
-                    "in the Settings -> Model Provider."
+                    "No Embedding Model available. Please configure a valid provider in the Settings -> Model Provider."
                 )
             except ProviderTokenNotInitError as ex:
                 raise ValueError(f"The dataset in unavailable, due to: {ex.description}")
@@ -382,7 +382,7 @@ class DatasetService:
         if dataset.tenant_id != user.current_tenant_id:
             logging.debug(f"User {user.id} does not have permission to access dataset {dataset.id}")
             raise NoPermissionError("You do not have permission to access this dataset.")
-        if user.current_role not in (TenantAccountRole.OWNER, TenantAccountRole.ADMIN):
+        if user.current_role != TenantAccountRole.OWNER:
             if dataset.permission == DatasetPermissionEnum.ONLY_ME and dataset.created_by != user.id:
                 logging.debug(f"User {user.id} does not have permission to access dataset {dataset.id}")
                 raise NoPermissionError("You do not have permission to access this dataset.")
@@ -404,7 +404,7 @@ class DatasetService:
         if not user:
             raise ValueError("User not found")
 
-        if user.current_role not in (TenantAccountRole.OWNER, TenantAccountRole.ADMIN):
+        if user.current_role != TenantAccountRole.OWNER:
             if dataset.permission == DatasetPermissionEnum.ONLY_ME:
                 if dataset.created_by != user.id:
                     raise NoPermissionError("You do not have permission to access this dataset.")
@@ -792,13 +792,19 @@ class DocumentService:
             dataset.indexing_technique = knowledge_config.indexing_technique
             if knowledge_config.indexing_technique == "high_quality":
                 model_manager = ModelManager()
-                embedding_model = model_manager.get_default_model_instance(
-                    tenant_id=current_user.current_tenant_id, model_type=ModelType.TEXT_EMBEDDING
-                )
-                dataset.embedding_model = embedding_model.model
-                dataset.embedding_model_provider = embedding_model.provider
+                if knowledge_config.embedding_model and knowledge_config.embedding_model_provider:
+                    dataset_embedding_model = knowledge_config.embedding_model
+                    dataset_embedding_model_provider = knowledge_config.embedding_model_provider
+                else:
+                    embedding_model = model_manager.get_default_model_instance(
+                        tenant_id=current_user.current_tenant_id, model_type=ModelType.TEXT_EMBEDDING
+                    )
+                    dataset_embedding_model = embedding_model.model
+                    dataset_embedding_model_provider = embedding_model.provider
+                dataset.embedding_model = dataset_embedding_model
+                dataset.embedding_model_provider = dataset_embedding_model_provider
                 dataset_collection_binding = DatasetCollectionBindingService.get_dataset_collection_binding(
-                    embedding_model.provider, embedding_model.model
+                    dataset_embedding_model_provider, dataset_embedding_model
                 )
                 dataset.collection_binding_id = dataset_collection_binding.id
                 if not dataset.retrieval_model:
@@ -810,7 +816,11 @@ class DocumentService:
                         "score_threshold_enabled": False,
                     }
 
-                    dataset.retrieval_model = knowledge_config.retrieval_model.model_dump() or default_retrieval_model  # type: ignore
+                    dataset.retrieval_model = (
+                        knowledge_config.retrieval_model.model_dump()
+                        if knowledge_config.retrieval_model
+                        else default_retrieval_model
+                    )  # type: ignore
 
         documents = []
         if knowledge_config.original_document_id:
@@ -849,7 +859,7 @@ class DocumentService:
                 position = DocumentService.get_documents_position(dataset.id)
                 document_ids = []
                 duplicate_document_ids = []
-                if knowledge_config.data_source.info_list.data_source_type == "upload_file":
+                if knowledge_config.data_source.info_list.data_source_type == "upload_file":  # type: ignore
                     upload_file_list = knowledge_config.data_source.info_list.file_info_list.file_ids  # type: ignore
                     for file_id in upload_file_list:
                         file = (
@@ -891,7 +901,7 @@ class DocumentService:
                         document = DocumentService.build_document(
                             dataset,
                             dataset_process_rule.id,  # type: ignore
-                            knowledge_config.data_source.info_list.data_source_type,
+                            knowledge_config.data_source.info_list.data_source_type,  # type: ignore
                             knowledge_config.doc_form,
                             knowledge_config.doc_language,
                             data_source_info,
@@ -906,8 +916,8 @@ class DocumentService:
                         document_ids.append(document.id)
                         documents.append(document)
                         position += 1
-                elif knowledge_config.data_source.info_list.data_source_type == "notion_import":
-                    notion_info_list = knowledge_config.data_source.info_list.notion_info_list
+                elif knowledge_config.data_source.info_list.data_source_type == "notion_import":  # type: ignore
+                    notion_info_list = knowledge_config.data_source.info_list.notion_info_list  # type: ignore
                     if not notion_info_list:
                         raise ValueError("No notion info list found.")
                     exist_page_ids = []
@@ -946,7 +956,7 @@ class DocumentService:
                                 document = DocumentService.build_document(
                                     dataset,
                                     dataset_process_rule.id,  # type: ignore
-                                    knowledge_config.data_source.info_list.data_source_type,
+                                    knowledge_config.data_source.info_list.data_source_type,  # type: ignore
                                     knowledge_config.doc_form,
                                     knowledge_config.doc_language,
                                     data_source_info,
@@ -966,8 +976,8 @@ class DocumentService:
                     # delete not selected documents
                     if len(exist_document) > 0:
                         clean_notion_document_task.delay(list(exist_document.values()), dataset.id)
-                elif knowledge_config.data_source.info_list.data_source_type == "website_crawl":
-                    website_info = knowledge_config.data_source.info_list.website_info_list
+                elif knowledge_config.data_source.info_list.data_source_type == "website_crawl":  # type: ignore
+                    website_info = knowledge_config.data_source.info_list.website_info_list  # type: ignore
                     if not website_info:
                         raise ValueError("No website info list found.")
                     urls = website_info.urls
@@ -986,7 +996,7 @@ class DocumentService:
                         document = DocumentService.build_document(
                             dataset,
                             dataset_process_rule.id,  # type: ignore
-                            knowledge_config.data_source.info_list.data_source_type,
+                            knowledge_config.data_source.info_list.data_source_type,  # type: ignore
                             knowledge_config.doc_form,
                             knowledge_config.doc_language,
                             data_source_info,
@@ -1185,20 +1195,20 @@ class DocumentService:
 
         if features.billing.enabled:
             count = 0
-            if knowledge_config.data_source.info_list.data_source_type == "upload_file":
+            if knowledge_config.data_source.info_list.data_source_type == "upload_file":  # type: ignore
                 upload_file_list = (
-                    knowledge_config.data_source.info_list.file_info_list.file_ids
-                    if knowledge_config.data_source.info_list.file_info_list
+                    knowledge_config.data_source.info_list.file_info_list.file_ids  # type: ignore
+                    if knowledge_config.data_source.info_list.file_info_list  # type: ignore
                     else []
                 )
                 count = len(upload_file_list)
-            elif knowledge_config.data_source.info_list.data_source_type == "notion_import":
-                notion_info_list = knowledge_config.data_source.info_list.notion_info_list
+            elif knowledge_config.data_source.info_list.data_source_type == "notion_import":  # type: ignore
+                notion_info_list = knowledge_config.data_source.info_list.notion_info_list  # type: ignore
                 if notion_info_list:
                     for notion_info in notion_info_list:
                         count = count + len(notion_info.pages)
-            elif knowledge_config.data_source.info_list.data_source_type == "website_crawl":
-                website_info = knowledge_config.data_source.info_list.website_info_list
+            elif knowledge_config.data_source.info_list.data_source_type == "website_crawl":  # type: ignore
+                website_info = knowledge_config.data_source.info_list.website_info_list  # type: ignore
                 if website_info:
                     count = len(website_info.urls)
             batch_upload_limit = int(dify_config.BATCH_UPLOAD_LIMIT)
@@ -1229,7 +1239,7 @@ class DocumentService:
         dataset = Dataset(
             tenant_id=tenant_id,
             name="",
-            data_source_type=knowledge_config.data_source.info_list.data_source_type,
+            data_source_type=knowledge_config.data_source.info_list.data_source_type,  # type: ignore
             indexing_technique=knowledge_config.indexing_technique,
             created_by=account.id,
             embedding_model=knowledge_config.embedding_model,
@@ -1601,8 +1611,11 @@ class SegmentService:
                     segment.answer = args.answer
                     segment.word_count += len(args.answer) if args.answer else 0
                 word_count_change = segment.word_count - word_count_change
+                keyword_changed = False
                 if args.keywords:
-                    segment.keywords = args.keywords
+                    if Counter(segment.keywords) != Counter(args.keywords):
+                        segment.keywords = args.keywords
+                        keyword_changed = True
                 segment.enabled = True
                 segment.disabled_at = None
                 segment.disabled_by = None
@@ -1613,13 +1626,6 @@ class SegmentService:
                     document.word_count = max(0, document.word_count + word_count_change)
                     db.session.add(document)
                 # update segment index task
-                if args.enabled:
-                    VectorService.create_segments_vector(
-                        [args.keywords] if args.keywords else None,
-                        [segment],
-                        dataset,
-                        document.doc_form,
-                    )
                 if document.doc_form == IndexType.PARENT_CHILD_INDEX and args.regenerate_child_chunks:
                     # regenerate child chunks
                     # get embedding model instance
@@ -1652,6 +1658,14 @@ class SegmentService:
                     VectorService.generate_child_chunks(
                         segment, document, dataset, embedding_model_instance, processing_rule, True
                     )
+                elif document.doc_form in (IndexType.PARAGRAPH_INDEX, IndexType.QA_INDEX):
+                    if args.enabled or keyword_changed:
+                        VectorService.create_segments_vector(
+                            [args.keywords] if args.keywords else None,
+                            [segment],
+                            dataset,
+                            document.doc_form,
+                        )
             else:
                 segment_hash = helper.generate_text_hash(content)
                 tokens = 0
