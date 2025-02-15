@@ -205,13 +205,6 @@ export const getMultipleRetrievalConfig = (
       result.reranking_mode = RerankingModeEnum.WeightedScore
       setDefaultWeights()
     }
-    if (reranking_mode === RerankingModeEnum.RerankingModel && rerankModelIsValid) {
-      result.reranking_enable = true
-      result.reranking_model = {
-        provider: validRerankModel.provider || '',
-        model: validRerankModel.model || '',
-      }
-    }
   }
 
   return result
